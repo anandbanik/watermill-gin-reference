@@ -1,0 +1,63 @@
+# Local SQS environment using Floci (https://floci.io/).
+# Floci emulates AWS services on port 4566 — no real AWS account needed.
+#
+# Start:
+#   docker compose -f docker-compose-sqs.yml up -d
+#
+# Run the app against it:
+#   MESSAGING_BACKEND=sqs \
+#   SQS_QUEUE_NAME=orders \
+#   AWS_ENDPOINT=http://localhost:4566 \
+#   AWS_REGION=us-east-1 \
+#   AWS_ACCESS_KEY_ID=test \
+#   AWS_SECRET_ACCESS_KEY=test \
+#   go run .
+#
+# Publish a test message:
+#   MESSAGING_BACKEND=sqs \
+#   SQS_QUEUE_NAME=orders \
+#   AWS_ENDPOINT=http://localhost:4566 \
+#   AWS_REGION=us-east-1 \
+#   AWS_ACCESS_KEY_ID=test \
+#   AWS_SECRET_ACCESS_KEY=test \
+#   go run ./cmd/publisher -id sqs-1 -customer carol -amount 75.00
+
+services:
+  floci:
+    image: floci/floci:latest
+    ports:
+      - "4566:4566"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      AWS_DEFAULT_REGION: us-east-1
+    healthcheck:
+      test: ["CMD", "curl", "-s", "http://localhost:4566"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    networks:
+      - watermill-gin-network
+
+  watermill-gin:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: watermill-gin
+    environment:
+      - HTTP_ADDR=:9090
+      - MESSAGING_BACKEND=sqs
+      - AWS_ENDPOINT=http://floci:4566
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - AWS_REGION=us-east-1
+    ports:
+      - 9090:9090
+    networks:
+      - watermill-gin-network
+
+networks:
+  watermill-gin-network:
+    driver: bridge
+    name: watermill-gin-network

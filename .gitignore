@@ -1,0 +1,5 @@
+/watermill-gin
+/publisher
+*.exe
+.env
+settings.local.json

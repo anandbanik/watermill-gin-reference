@@ -1,0 +1,51 @@
+# Single-node Kafka (KRaft mode, no ZooKeeper) for local development.
+services:
+  kafka:
+    image: apache/kafka:3.8.0
+    ports:
+      - "9092:9092"
+    container_name: kafka
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: "broker,controller"
+      KAFKA_CONTROLLER_QUORUM_VOTERS: "1@kafka:9093"
+      KAFKA_LISTENERS: "PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093,INTERNAL://0.0.0.0:9094"
+      KAFKA_ADVERTISED_LISTENERS: "PLAINTEXT://localhost:9092,INTERNAL://kafka:9094"
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: "CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,INTERNAL:PLAINTEXT"
+      KAFKA_CONTROLLER_LISTENER_NAMES: "CONTROLLER"
+      KAFKA_INTER_BROKER_LISTENER_NAME: "INTERNAL"
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "9094"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 30s
+    networks:
+      - watermill-gin-network
+
+  watermill-gin:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: watermill-gin
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      - HTTP_ADDR=:9090
+      - MESSAGING_BACKEND=kafka
+      - KAFKA_BROKERS=kafka:9094
+      - KAFKA_TOPICS=orders
+      - KAFKA_GROUP_ID=watermill-gin-group
+    ports:
+      - 9090:9090
+    networks:
+      - watermill-gin-network
+
+networks:
+  watermill-gin-network:
+    driver: bridge
+    name: watermill-gin-network
