@@ -38,8 +38,8 @@ services:
       - HTTP_ADDR=:9090
       - MESSAGING_BACKEND=kafka
       - KAFKA_BROKERS=kafka:9094
-      - KAFKA_TOPICS=orders
-      - KAFKA_GROUP_ID=watermill-gin-group
+      - KAFKA_TOPIC=orders
+      - KAFKA_CONSUMER_GROUP=watermill-gin-group
     ports:
       - 9090:9090
     networks:
