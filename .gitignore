@@ -3,3 +3,4 @@
 *.exe
 .env
 settings.local.json
+.DS_Store
