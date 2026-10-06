@@ -1,10 +1,10 @@
-# Multi-Tenant Calculation API — Low-Level Design
+# Multi-Tenant CalculateNDI API — Low-Level Design
 
 Oct 2, 2026 · @Anand
 
 ## Overview
 
-Each tenant gets its own endpoint, `POST /v1/tenants/{tenantId}/calculations`, and its own calculator class behind one shared interface. Shared code resolves the tenant, authorizes the caller and dispatches; it contains no tenant-specific logic and no `if (tenant == ...)` branch. Each tenant's logic lives in its own build module, which cannot import another tenant's code.
+Each tenant gets its own endpoint, `POST /v1/tenants/{tenantId}/calculate-ndi`, and its own calculator class behind one shared interface. Shared code resolves the tenant, authorizes the caller and dispatches; it contains no tenant-specific logic and no `if (tenant == ...)` branch. Each tenant's logic lives in its own build module, which cannot import another tenant's code.
 
 Assumptions this design rests on:
 
@@ -12,7 +12,8 @@ Assumptions this design rests on:
 - **Tenants are code:** each tenant's calculator ships with the service and is known at deploy time.
 - **Isolation is logical:** one deployment and one database, separated by code boundaries, tenant-scoped data access and per-tenant runtime limits.
 - **Calculations are synchronous:** short and CPU-bound, so there is no job or polling API.
-- **Example tenants** `acme` and `globex`, and their fee formulas, are placeholders for your real tenants and logic.
+- **Example tenants:** `uscard` and `autofinance` stand in for the real tenants.
+- **NDI:** read here as net disposable income. Both NDI formulas are placeholders for the real rules.
 
 ## Isolation model
 
@@ -22,7 +23,7 @@ Isolation is enforced at seven layers, so a mistake at one layer is caught by th
 | --- | --- | --- |
 | Routing | Shared route template, one URL per tenant | Tenant id is read from the path once, by the interceptor only |
 | Identity | Shared | Token's `tenant_id` claim must equal the path tenant, else 403 |
-| Calculation logic | Per-tenant module | Each module implements `TenantCalculator`; modules cannot import each other |
+| NDI calculation logic | Per-tenant module | Each module implements `TenantCalculator`; modules cannot import each other |
 | Input and output schema | Per-tenant | Each module owns its typed input and output records |
 | Configuration | Per-tenant | Platform hands a calculator only its own `tenants.<id>.*` settings |
 | Data | Shared tables | `tenant_id` on every row, enforced by Postgres row-level security |
@@ -43,8 +44,8 @@ Every tenant has the same two endpoints under its own path. The envelope is shar
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| POST | `/v1/tenants/{tenantId}/calculations` | Run the tenant's calculation and store the result |
-| GET | `/v1/tenants/{tenantId}/calculations/{calculationId}` | Fetch a stored result |
+| POST | `/v1/tenants/{tenantId}/calculate-ndi` | Run the tenant's NDI calculation and store the result |
+| GET | `/v1/tenants/{tenantId}/calculate-ndi/{calculationId}` | Fetch a stored result |
 
 `tenantId` is a lowercase slug matching `[a-z][a-z0-9-]{1,30}`.
 
@@ -61,29 +62,29 @@ Every tenant has the same two endpoints under its own path. The envelope is shar
 The same call for two tenants. Each tenant has its own input shape and its own formula.
 
 ```http
-POST /v1/tenants/acme/calculations
-{ "input": { "amount": "250000.00", "currency": "USD" } }
+POST /v1/tenants/uscard/calculate-ndi
+{ "input": { "monthlyNetIncome": "5200.00", "monthlyHousingCost": "1500.00", "monthlyDebtPayments": "650.00" } }
 
 200 OK
 {
   "calculationId": "7b0e4c1a-5d2f-4e7a-9a53-2f6f1c0d8e11",
-  "tenantId": "acme",
-  "calculatorVersion": "acme-1",
-  "result": { "fee": "3000.00", "currency": "USD" },
+  "tenantId": "uscard",
+  "calculatorVersion": "uscard-1",
+  "result": { "ndi": "1850.00" },
   "computedAt": "2026-10-02T15:47:00Z"
 }
 ```
 
 ```http
-POST /v1/tenants/globex/calculations
-{ "input": { "units": 120 } }
+POST /v1/tenants/autofinance/calculate-ndi
+{ "input": { "annualGrossIncome": "84000.00", "monthlyObligations": "2100.00", "dependents": 2 } }
 
 200 OK
 {
   "calculationId": "c2a6f0de-91b4-4b0c-8a3e-0f4f7d5b6a22",
-  "tenantId": "globex",
-  "calculatorVersion": "globex-1",
-  "result": { "charge": "306.00" },
+  "tenantId": "autofinance",
+  "calculatorVersion": "autofinance-1",
+  "result": { "ndi": "2550.00" },
   "computedAt": "2026-10-02T15:47:01Z"
 }
 ```
@@ -117,7 +118,7 @@ A request passes through the same three shared steps for every tenant, then cros
 1. The security filter validates the JWT; an invalid token gets 401 before any tenant logic runs.
 2. The interceptor compares the path tenant with the token's `tenant_id`, then builds the `TenantContext` with that tenant's settings.
 3. The service asks the registry for the tenant's calculator and converts `input` to the calculator's own input type.
-4. The guard applies the tenant's rate limit and bulkhead, then calls `calculate`.
+4. The guard applies the tenant's rate limit and bulkhead, then calls `calculateNDI`.
 5. The repository stores the result in a transaction scoped to the tenant, and the response is returned.
 
 ## Code structure
@@ -126,11 +127,11 @@ The build has one contract module, one shared application module and one module 
 
 ```text
 calc-platform/
-├── calc-spi/               com.example.calc.spi           the contract, no framework
-├── calc-app/               com.example.calc.app           Spring Boot service, shared code
+├── calc-spi/                 com.capitalone.calc.spi                 the contract, no framework
+├── calc-app/                 com.capitalone.calc.app                 Spring Boot service, shared code
 └── tenants/
-    ├── tenant-acme/        com.example.calc.tenant.acme
-    └── tenant-globex/      com.example.calc.tenant.globex
+    ├── tenant-uscard/        com.capitalone.calc.tenant.uscard
+    └── tenant-autofinance/   com.capitalone.calc.tenant.autofinance
 ```
 
 | Module | Contains | May depend on | Must not depend on |
@@ -139,7 +140,7 @@ calc-platform/
 | `tenant-<id>` | One calculator, its input and output records, its tests | `calc-spi`, JDK | `calc-app`, other tenant modules, Spring, JDBC, HTTP clients |
 | `calc-app` | Controller, interceptor, registry, service, guard, repository | `calc-spi` at compile scope; tenant modules at **runtime scope only** | Tenant classes in source |
 
-Runtime scope is the key detail. `calc-app` ships with every tenant module on its classpath, but its source cannot name `AcmeCalculator`, so a tenant-specific branch in shared code does not compile. Calculators are found at startup through Java's `ServiceLoader`.
+Runtime scope is the key detail. `calc-app` ships with every tenant module on its classpath, but its source cannot name `UsCardCalculator`, so a tenant-specific branch in shared code does not compile. Calculators are found at startup through Java's `ServiceLoader`.
 
 Each tenant module can have its own code owners, so a change to one tenant's logic is reviewed by that tenant's team and touches no shared file.
 
@@ -184,81 +185,83 @@ public interface TenantCalculator<I, O> {
     /** The tenant's own input type. The platform deserializes the request's "input" into it. */
     Class<I> inputType();
 
-    O calculate(TenantContext ctx, I input);
+    O calculateNDI(TenantContext ctx, I input);
 }
 ```
 
 `TenantContext` is passed as a parameter, not held in a `ThreadLocal`. A method that needs the tenant must ask for it in its signature, so it cannot be forgotten or leak across pooled threads.
 
-### A tenant module (`tenant-acme`)
+### A tenant module (`tenant-uscard`)
 
-Acme charges 1.5% on the first 100,000 and 1.0% above it. Its input and output records are package-private, so nothing outside the module can use them.
+US Card takes monthly net income and subtracts housing, debt payments and a living allowance. Its input and output records are package-private, so nothing outside the module can use them.
 
 ```java
-record AcmeInput(BigDecimal amount, String currency) {}
-record AcmeResult(BigDecimal fee, String currency) {}
+record UsCardInput(BigDecimal monthlyNetIncome, BigDecimal monthlyHousingCost, BigDecimal monthlyDebtPayments) {}
+record UsCardResult(BigDecimal ndi) {}
 
-public final class AcmeCalculator implements TenantCalculator<AcmeInput, AcmeResult> {
-    private static final TenantId ID = new TenantId("acme");
-    private static final BigDecimal TIER_LIMIT = new BigDecimal("100000");
+public final class UsCardCalculator implements TenantCalculator<UsCardInput, UsCardResult> {
+    private static final TenantId ID = new TenantId("uscard");
 
     @Override public TenantId tenantId() { return ID; }
-    @Override public String version() { return "acme-1"; }
-    @Override public Class<AcmeInput> inputType() { return AcmeInput.class; }
+    @Override public String version() { return "uscard-1"; }
+    @Override public Class<UsCardInput> inputType() { return UsCardInput.class; }
 
     @Override
-    public AcmeResult calculate(TenantContext ctx, AcmeInput input) {
-        if (input.amount().signum() <= 0) {
-            throw new CalculationRejectedException("amount must be positive");
+    public UsCardResult calculateNDI(TenantContext ctx, UsCardInput input) {
+        if (input.monthlyNetIncome().signum() <= 0) {
+            throw new CalculateNDIRejectedException("monthlyNetIncome must be positive");
         }
-        BigDecimal lowRate = ctx.settings().decimal("low-tier-rate", "0.015");
-        BigDecimal highRate = ctx.settings().decimal("high-tier-rate", "0.010");
+        BigDecimal livingAllowance = ctx.settings().decimal("living-allowance", "1200.00");
 
-        BigDecimal low = input.amount().min(TIER_LIMIT);
-        BigDecimal high = input.amount().subtract(low);
-        BigDecimal fee = low.multiply(lowRate).add(high.multiply(highRate))
+        BigDecimal ndi = input.monthlyNetIncome()
+                .subtract(input.monthlyHousingCost())
+                .subtract(input.monthlyDebtPayments())
+                .subtract(livingAllowance)
                 .setScale(2, RoundingMode.HALF_EVEN);
-        return new AcmeResult(fee, input.currency());
+        return new UsCardResult(ndi);
     }
 }
 ```
 
-The module registers itself with one line in `META-INF/services/com.example.calc.spi.TenantCalculator`:
+The module registers itself with one line in `META-INF/services/com.capitalone.calc.spi.TenantCalculator`:
 
 ```text
-com.example.calc.tenant.acme.AcmeCalculator
+com.capitalone.calc.tenant.uscard.UsCardCalculator
 ```
 
-### A second tenant (`tenant-globex`)
+### A second tenant (`tenant-autofinance`)
 
-Globex has a different input, a different formula and different settings. It shares no code with Acme.
+Auto Finance starts from annual gross income, applies an effective tax rate, then subtracts obligations and an allowance per dependent. It has a different input, formula and settings, and shares no code with US Card.
 
 ```java
-record GlobexInput(int units) {}
-record GlobexResult(BigDecimal charge) {}
+record AutoFinanceInput(BigDecimal annualGrossIncome, BigDecimal monthlyObligations, int dependents) {}
+record AutoFinanceResult(BigDecimal ndi) {}
 
-public final class GlobexCalculator implements TenantCalculator<GlobexInput, GlobexResult> {
-    private static final TenantId ID = new TenantId("globex");
-    private static final int DISCOUNT_ABOVE_UNITS = 100;
-    private static final BigDecimal DISCOUNT_FACTOR = new BigDecimal("0.90");
+public final class AutoFinanceCalculator implements TenantCalculator<AutoFinanceInput, AutoFinanceResult> {
+    private static final TenantId ID = new TenantId("autofinance");
+    private static final BigDecimal MONTHS_PER_YEAR = BigDecimal.valueOf(12);
 
     @Override public TenantId tenantId() { return ID; }
-    @Override public String version() { return "globex-1"; }
-    @Override public Class<GlobexInput> inputType() { return GlobexInput.class; }
+    @Override public String version() { return "autofinance-1"; }
+    @Override public Class<AutoFinanceInput> inputType() { return AutoFinanceInput.class; }
 
     @Override
-    public GlobexResult calculate(TenantContext ctx, GlobexInput input) {
-        if (input.units() <= 0) {
-            throw new CalculationRejectedException("units must be positive");
+    public AutoFinanceResult calculateNDI(TenantContext ctx, AutoFinanceInput input) {
+        if (input.annualGrossIncome().signum() <= 0) {
+            throw new CalculateNDIRejectedException("annualGrossIncome must be positive");
         }
-        BigDecimal baseFee = ctx.settings().decimal("base-fee", "40.00");
-        BigDecimal perUnit = ctx.settings().decimal("per-unit", "2.50");
+        if (input.dependents() < 0) {
+            throw new CalculateNDIRejectedException("dependents must not be negative");
+        }
+        BigDecimal taxRate = ctx.settings().decimal("effective-tax-rate", "0.25");
+        BigDecimal perDependent = ctx.settings().decimal("per-dependent-allowance", "300.00");
 
-        BigDecimal charge = baseFee.add(perUnit.multiply(BigDecimal.valueOf(input.units())));
-        if (input.units() > DISCOUNT_ABOVE_UNITS) {
-            charge = charge.multiply(DISCOUNT_FACTOR);
-        }
-        return new GlobexResult(charge.setScale(2, RoundingMode.HALF_EVEN));
+        BigDecimal monthlyGross = input.annualGrossIncome().divide(MONTHS_PER_YEAR, 10, RoundingMode.HALF_EVEN);
+        BigDecimal monthlyNet = monthlyGross.multiply(BigDecimal.ONE.subtract(taxRate));
+        BigDecimal ndi = monthlyNet
+                .subtract(input.monthlyObligations())
+                .subtract(perDependent.multiply(BigDecimal.valueOf(input.dependents())));
+        return new AutoFinanceResult(ndi.setScale(2, RoundingMode.HALF_EVEN));
     }
 }
 ```
@@ -305,24 +308,24 @@ public final class TenantCalculatorRegistry {
 The service is identical for every tenant: look up, convert, guard, call.
 
 ```java
-public final class CalculationService {
+public final class CalculateNDIService {
     private final TenantCalculatorRegistry registry;
     private final TenantGuard guard;
     private final ObjectMapper mapper;
 
-    public CalculationService(TenantCalculatorRegistry registry, TenantGuard guard, ObjectMapper mapper) {
+    public CalculateNDIService(TenantCalculatorRegistry registry, TenantGuard guard, ObjectMapper mapper) {
         this.registry = registry;
         this.guard = guard;
         this.mapper = mapper;
     }
 
-    public Computation calculate(TenantContext ctx, JsonNode rawInput) {
+    public Computation calculateNDI(TenantContext ctx, JsonNode rawInput) {
         return run(registry.forTenant(ctx.tenantId()), ctx, rawInput);
     }
 
     private <I, O> Computation run(TenantCalculator<I, O> calculator, TenantContext ctx, JsonNode rawInput) {
         I input = toInput(rawInput, calculator.inputType());
-        O output = guard.run(ctx.tenantId(), () -> calculator.calculate(ctx, input));
+        O output = guard.run(ctx.tenantId(), () -> calculator.calculateNDI(ctx, input));
         return new Computation(calculator.version(), mapper.valueToTree(output));
     }
 
@@ -343,7 +346,7 @@ public interface TenantGuard {
 }
 ```
 
-The platform's `ObjectMapper` rejects unknown, missing and null fields, and writes `BigDecimal` as a string. Tenant modules therefore need no JSON library, and sending Acme's body to Globex's endpoint fails with 400.
+The platform's `ObjectMapper` rejects unknown, missing and null fields, and writes `BigDecimal` as a string. Tenant modules therefore need no JSON library, and sending US Card's body to Auto Finance's endpoint fails with 400.
 
 ### Web layer (sketch)
 
@@ -393,29 +396,29 @@ A `HandlerMethodArgumentResolver` turns that request attribute into a controller
 
 ```java
 @RestController
-@RequestMapping("/v1/tenants/{tenantId}/calculations")
-class CalculationController {
-    private final CalculationService service;
-    private final CalculationRepository repository;
+@RequestMapping("/v1/tenants/{tenantId}/calculate-ndi")
+class CalculateNDIController {
+    private final CalculateNDIService service;
+    private final CalculateNDIRepository repository;
 
-    CalculationController(CalculationService service, CalculationRepository repository) {
+    CalculateNDIController(CalculateNDIService service, CalculateNDIRepository repository) {
         this.service = service;
         this.repository = repository;
     }
 
     @PostMapping
-    CalculationResponse calculate(TenantContext ctx,
-                                  @RequestHeader(name = "Idempotency-Key", required = false) String key,
-                                  @RequestBody CalculationRequest body) {
-        Computation computed = service.calculate(ctx, body.input());
-        return CalculationResponse.of(repository.save(ctx, key, body.input(), computed));
+    CalculateNDIResponse calculateNDI(TenantContext ctx,
+                                      @RequestHeader(name = "Idempotency-Key", required = false) String key,
+                                      @RequestBody CalculateNDIRequest body) {
+        Computation computed = service.calculateNDI(ctx, body.input());
+        return CalculateNDIResponse.of(repository.save(ctx, key, body.input(), computed));
     }
 
     @GetMapping("/{calculationId}")
-    CalculationResponse get(TenantContext ctx, @PathVariable UUID calculationId) {
+    CalculateNDIResponse get(TenantContext ctx, @PathVariable UUID calculationId) {
         return repository.find(ctx, calculationId)
-                .map(CalculationResponse::of)
-                .orElseThrow(CalculationNotFoundException::new);
+                .map(CalculateNDIResponse::of)
+                .orElseThrow(NDINotFoundException::new);
     }
 }
 ```
@@ -428,7 +431,7 @@ All tenants share one table, and Postgres row-level security filters every state
 
 ```sql
 -- Run by the migration role (owns the table).
-CREATE TABLE calculation (
+CREATE TABLE ndi_calculation (
     tenant_id          text        NOT NULL,
     calculation_id     uuid        NOT NULL,
     calculator_version text        NOT NULL,
@@ -440,40 +443,40 @@ CREATE TABLE calculation (
     UNIQUE (tenant_id, idempotency_key)
 );
 
-ALTER TABLE calculation ENABLE ROW LEVEL SECURITY;
-ALTER TABLE calculation FORCE ROW LEVEL SECURITY;
+ALTER TABLE ndi_calculation ENABLE ROW LEVEL SECURITY;
+ALTER TABLE ndi_calculation FORCE ROW LEVEL SECURITY;
 
 -- A row is visible, and writable, only when it belongs to the tenant
 -- the current transaction was opened for.
-CREATE POLICY tenant_isolation ON calculation
+CREATE POLICY tenant_isolation ON ndi_calculation
     USING      (tenant_id = current_setting('app.tenant_id', true))
     WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
 
 -- The service connects as calc_app: not the owner, no BYPASSRLS.
-GRANT SELECT, INSERT ON calculation TO calc_app;
+GRANT SELECT, INSERT ON ndi_calculation TO calc_app;
 ```
 
 The repository opens every transaction by naming the tenant. The third argument `true` makes the setting local to the transaction, so it cannot carry over on a pooled connection.
 
 ```java
 @Repository
-class CalculationRepository {
+class CalculateNDIRepository {
     private final JdbcClient jdbc;
     private final TransactionTemplate tx;
 
-    CalculationRepository(JdbcClient jdbc, TransactionTemplate tx) {
+    CalculateNDIRepository(JdbcClient jdbc, TransactionTemplate tx) {
         this.jdbc = jdbc;
         this.tx = tx;
     }
 
-    Optional<StoredCalculation> find(TenantContext ctx, UUID calculationId) {
+    Optional<StoredNDI> find(TenantContext ctx, UUID calculationId) {
         return inTenant(ctx, () -> jdbc.sql("""
                 SELECT tenant_id, calculation_id, calculator_version, result, computed_at
-                  FROM calculation
+                  FROM ndi_calculation
                  WHERE tenant_id = :tenant AND calculation_id = :id""")
                 .param("tenant", ctx.tenantId().value())
                 .param("id", calculationId)
-                .query(StoredCalculation.class)
+                .query(StoredNDI.class)
                 .optional());
     }
 
@@ -496,7 +499,7 @@ Design points:
 - **Idempotency keys are per tenant.** Two tenants can use the same key without colliding.
 - **Results are append-only.** The service role has no `UPDATE` or `DELETE` grant.
 
-The schema above was run on Postgres 16 as `calc_app`. Globex could not read or count Acme's row, could not insert a row labelled `acme`, and a session with no tenant set saw zero rows.
+The schema above was run on Postgres 16 as `calc_app`. Auto Finance could not read or count US Card's row, could not insert a row labelled `uscard`, and a session with no tenant set saw zero rows.
 
 ## Runtime isolation
 
@@ -548,37 +551,37 @@ Each isolation rule has a check that fails the build or a test when the rule is 
 | Shared code names a tenant class | Tenant modules are runtime-scope dependencies of `calc-app` | Compile |
 | A tenant module uses Spring, JDBC or an HTTP client | ArchUnit rule below | Unit test |
 | Two modules claim one tenant | Registry throws at startup | Startup |
-| A caller uses another tenant's path | API test: Acme token on Globex path returns 403 | Integration test |
+| A caller uses another tenant's path | API test: US Card token on Auto Finance path returns 403 | Integration test |
 | A query runs without a tenant | Row-level security returns no rows | Integration test |
 | A tenant's formula changes by accident | Golden input and output cases inside the tenant module | Unit test |
 
 The ArchUnit rules live in `calc-app`'s tests, where every tenant module is on the classpath:
 
 ```java
-@AnalyzeClasses(packages = "com.example.calc")
+@AnalyzeClasses(packages = "com.capitalone.calc")
 class TenantIsolationArchTest {
 
     @ArchTest
     static final ArchRule tenants_do_not_depend_on_each_other =
-            slices().matching("com.example.calc.tenant.(*)..").should().notDependOnEachOther();
+            slices().matching("com.capitalone.calc.tenant.(*)..").should().notDependOnEachOther();
 
     @ArchTest
     static final ArchRule tenants_depend_only_on_the_contract =
-            classes().that().resideInAPackage("com.example.calc.tenant..")
+            classes().that().resideInAPackage("com.capitalone.calc.tenant..")
                     .should().onlyDependOnClassesThat()
-                    .resideInAnyPackage("com.example.calc.spi..", "com.example.calc.tenant..", "java..");
+                    .resideInAnyPackage("com.capitalone.calc.spi..", "com.capitalone.calc.tenant..", "java..");
 
     @ArchTest
     static final ArchRule shared_code_does_not_name_tenants =
-            noClasses().that().resideOutsideOfPackage("com.example.calc.tenant..")
-                    .should().dependOnClassesThat().resideInAPackage("com.example.calc.tenant..");
+            noClasses().that().resideOutsideOfPackage("com.capitalone.calc.tenant..")
+                    .should().dependOnClassesThat().resideInAPackage("com.capitalone.calc.tenant..");
 }
 ```
 
 ### What was checked for this design
 
-- **Compiled and run:** the contract, both calculators, the registry and the service, with 16 checks passing. These include both worked examples (3000.00 and 306.00), each tenant's body rejected on the other's endpoint, and settings filtered per tenant.
-- **Compile boundary:** a Globex class importing `AcmeCalculator`, and a shared class naming it, both failed to compile.
+- **Compiled and run:** the contract, both calculators, the registry and the service, with 16 checks passing. These include both worked examples (1850.00 and 2550.00), each tenant's body rejected on the other's endpoint, and settings filtered per tenant.
+- **Compile boundary:** an Auto Finance class importing `UsCardCalculator`, and a shared class naming it, both failed to compile.
 - **Row-level security:** the schema and policy, run on Postgres 16.
 - **Not run:** the Spring web layer, the Resilience4j guard and the ArchUnit rules. Their libraries could not be downloaded in the environment this was drafted in.
 
@@ -588,12 +591,12 @@ Adding a tenant adds one module and one dependency line. No shared class, route 
 
 1. Create `tenants/tenant-<id>` with `calc-spi` as its only dependency.
 2. Define the tenant's input and output records and implement `TenantCalculator`, returning the new slug from `tenantId()`.
-3. Add the calculator's class name to `META-INF/services/com.example.calc.spi.TenantCalculator`.
+3. Add the calculator's class name to `META-INF/services/com.capitalone.calc.spi.TenantCalculator`.
 4. Add golden input and output cases as unit tests in the module.
 5. Add the module to `calc-app` as a runtime-scope dependency. The ArchUnit rules cover it by package pattern.
 6. Add `tenants.<id>.*` settings and limits to configuration.
 7. Issue credentials whose token carries `tenant_id = <id>`.
-8. Deploy. `POST /v1/tenants/<id>/calculations` is live.
+8. Deploy. `POST /v1/tenants/<id>/calculate-ndi` is live.
 
 Removing a tenant is the reverse of steps 5 and 7. Its endpoint then rejects every caller, and its stored rows stay unreadable until they are archived or deleted.
 
@@ -602,7 +605,7 @@ Removing a tenant is the reverse of steps 5 and 7. Its endpoint then rejects eve
 These are the assumptions most likely to change the design.
 
 - [ ] **Stack.** Java and Spring Boot are assumed. Which language and framework will this be built in?
-- [ ] **Tenant in the URL.** The design uses a path segment. A subdomain per tenant (`acme.api.example.com`) changes only the interceptor.
+- [ ] **Tenant in the URL.** The design uses a path segment. A subdomain per tenant (`uscard.api.capitalone.com`) changes only the interceptor.
 - [ ] **How tenants are added.** The design assumes a deploy per new tenant. If logic must change without a deploy, calculators become plugin jars or rule definitions, and the registry loads them at runtime.
 - [ ] **Storing results.** If the API can be stateless, drop the `GET` endpoint, the table and idempotency.
 - [ ] **Depth of data isolation.** One table with row-level security is assumed. Does any tenant need its own schema or database?
